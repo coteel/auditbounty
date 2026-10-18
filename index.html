@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AuditBounty — Audit Findings Triaged On-chain</title>
+<meta name="description" content="AuditBounty: a project funds a bounty pool, auditors file findings with a stake behind them, and an on-chain jury decides which findings are real. Valid findings pay out and keep the stake; noise loses it." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#121417; --surface:#1a1d22; --card:#22262d; --card2:#2a2f38;
+    --line:#2f343d; --line2:#434a56;
+    --orange:#fb923c; --lime:#a3e635; --steel:#94a3b8; --rust:#e11d48;
+    --ok:#a3e635; --warn:#fbbf24; --err:#f87171;
+    --txt:#eef1f5; --mut:#9aa7b8; --faint:#68758a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Sora',system-ui,sans-serif;
+    background:
+      radial-gradient(900px 500px at 85% -12%, rgba(251,146,60,.16) 0%, transparent 58%),
+      radial-gradient(760px 470px at 4% 106%, rgba(163,230,53,.07) 0%, transparent 60%),
+      var(--bg);
+    color:var(--txt); min-height:100vh; padding:26px 18px 60px;
+  }
+  .wrap{max-width:1140px;margin:0 auto}
+  header{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
+         padding-bottom:16px;border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:12px}
+  .mark{width:42px;height:42px;border-radius:13px;background:linear-gradient(150deg,var(--orange),var(--rust));
+        display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;color:#121417;
+        box-shadow:0 4px 22px rgba(251,146,60,.32)}
+  h1{font-size:22px;font-weight:700;letter-spacing:-.2px}
+  .tag{font-family:'Fira Code',monospace;font-size:10.5px;color:var(--faint);margin-top:3px}
+  .wallet{display:flex;gap:9px;align-items:center}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);display:inline-block}
+  .dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+  .pill{font-family:'Fira Code',monospace;font-size:11px;padding:5px 11px;border-radius:999px;
+        background:var(--surface);border:1px solid var(--line);color:var(--mut)}
+  button{font-family:inherit;cursor:pointer;border-radius:10px;font-size:13.5px;padding:9px 16px;
+         border:1px solid var(--line2);background:var(--card);color:var(--txt);transition:.16s}
+  button:hover{border-color:var(--orange);color:var(--orange)}
+  button.solid{background:linear-gradient(140deg,var(--orange),#ea7317);border:none;color:#121417;font-weight:600}
+  button.solid:hover{filter:brightness(1.09);color:#121417}
+  button.lime{background:rgba(163,230,53,.13);border:1px solid rgba(163,230,53,.42);color:var(--lime)}
+  button.danger{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.42);color:var(--err)}
+  button.ghost{background:transparent;border-color:var(--line)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  .hero{margin:24px 0 20px}
+  .hero h2{font-size:29px;line-height:1.24;font-weight:600;letter-spacing:-.5px}
+  .hero h2 em{font-style:normal;color:var(--orange)}
+  .hero h2 i{font-style:normal;color:var(--lime)}
+  .hero p{color:var(--mut);font-size:14.5px;line-height:1.65;margin-top:10px;max-width:800px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0 8px}
+  @media(max-width:780px){.stats{grid-template-columns:1fr 1fr}}
+  .st{background:linear-gradient(160deg,var(--card),var(--surface));border:1px solid var(--line);
+      border-radius:14px;padding:15px}
+  .st .k{font-family:'Fira Code',monospace;font-size:10px;color:var(--faint);letter-spacing:.5px}
+  .st .n{font-size:23px;font-weight:700;margin-top:6px;color:var(--orange)}
+  .st .n small{font-size:11px;color:var(--faint);font-weight:400;margin-left:3px}
+  .sec{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:26px 0 12px;flex-wrap:wrap}
+  .sec h3{font-size:15px;font-weight:600}
+  .sec h3 span{color:var(--faint);font-weight:400;font-size:12.5px;margin-left:7px}
+  .list{display:grid;gap:13px}
+  .rep{background:var(--card);border:1px solid var(--line);border-radius:15px;padding:17px;cursor:pointer;transition:.18s}
+  .rep:hover{border-color:var(--orange);transform:translateY(-1px)}
+  .rep.sel{border-color:var(--orange);box-shadow:0 0 0 1px var(--orange) inset}
+  .rep .top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+  .rep .id{font-family:'Fira Code',monospace;font-size:11px;color:var(--faint)}
+  .rep h4{font-size:15.5px;font-weight:600;margin:9px 0 4px}
+  .rep .sev{font-family:'Fira Code',monospace;font-size:10.5px;color:var(--faint)}
+  .badge{font-family:'Fira Code',monospace;font-size:10.5px;padding:3px 9px;border-radius:6px;white-space:nowrap}
+  .b0{background:rgba(148,163,184,.15);color:var(--steel);border:1px solid rgba(148,163,184,.4)}
+  .b1{background:rgba(163,230,53,.14);color:var(--ok);border:1px solid rgba(163,230,53,.42)}
+  .b2{background:rgba(248,113,113,.13);color:var(--err);border:1px solid rgba(248,113,113,.4)}
+  .b3{background:rgba(251,146,60,.14);color:var(--orange);border:1px solid rgba(251,146,60,.42)}
+  .nums{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+  .nums>div{font-family:'Fira Code',monospace;font-size:10px;color:var(--faint)}
+  .nums b{display:block;font-size:12.5px;color:var(--txt);margin-top:3px}
+  .nums b.t{color:var(--lime)}
+  .sevtag{font-family:'Fira Code',monospace;font-size:10px;padding:2px 7px;border-radius:5px;margin-left:6px}
+  .sv-critical{background:rgba(225,29,72,.18);color:#fb7185;border:1px solid rgba(225,29,72,.45)}
+  .sv-high{background:rgba(251,146,60,.16);color:var(--orange);border:1px solid rgba(251,146,60,.42)}
+  .sv-medium{background:rgba(251,191,36,.13);color:var(--warn);border:1px solid rgba(251,191,36,.4)}
+  .sv-low{background:rgba(148,163,184,.14);color:var(--steel);border:1px solid rgba(148,163,184,.4)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:15px;padding:18px;margin-bottom:14px}
+  .card h4{font-size:14px;font-weight:600;margin-bottom:12px}
+  .card h4 span{color:var(--faint);font-weight:400;font-size:12px;margin-left:6px}
+  .row{display:grid;gap:10px;grid-template-columns:1fr 1fr}
+  .row.three{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:700px){.row,.row.three{grid-template-columns:1fr}}
+  label{display:block;font-family:'Fira Code',monospace;font-size:10px;color:var(--faint);margin-bottom:5px}
+  input,select{width:100%;font-family:'Fira Code',monospace;font-size:12.5px;padding:10px 12px;border-radius:10px;
+        background:var(--surface);border:1px solid var(--line);color:var(--txt);outline:none}
+  input:focus,select:focus{border-color:var(--orange)}
+  .msg{font-family:'Fira Code',monospace;font-size:11px;margin-top:10px;padding:9px 11px;border-radius:9px;display:none}
+  .msg.show{display:block}
+  .msg.info{background:rgba(251,146,60,.1);border:1px solid rgba(251,146,60,.3);color:var(--orange)}
+  .msg.ok{background:rgba(163,230,53,.1);border:1px solid rgba(163,230,53,.32);color:var(--ok)}
+  .msg.err{background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.32);color:var(--err)}
+  .empty{padding:26px;text-align:center;color:var(--faint);font-size:13.5px;
+         border:1px dashed var(--line2);border-radius:14px}
+  .detail{display:none;margin-top:18px}
+  .detail.show{display:block}
+  .det{background:linear-gradient(165deg,var(--card2),var(--card));border:1px solid var(--line2);
+       border-radius:16px;padding:19px}
+  .det .hd{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .bar{height:6px;background:var(--surface);border-radius:999px;overflow:hidden;margin:14px 0}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--orange),var(--lime))}
+  .crit{font-size:13px;color:var(--mut);line-height:1.62;margin-top:9px;
+        background:var(--surface);border-left:2px solid var(--line2);padding:10px 12px;border-radius:0 9px 9px 0;
+        word-break:break-all}
+  .acts{display:flex;gap:9px;flex-wrap:wrap;margin-top:15px}
+  .lbl{font-family:'Fira Code',monospace;font-size:10px;color:var(--faint)}
+  a{color:var(--orange);text-decoration:none}
+  a:hover{text-decoration:underline}
+  footer{margin-top:32px;padding-top:16px;border-top:1px solid var(--line);
+         font-family:'Fira Code',monospace;font-size:11px;color:var(--faint);line-height:1.8}
+  .steps{font-size:13.5px;color:var(--mut);line-height:1.7}
+  .steps li{margin-left:18px;margin-bottom:5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="mark">B</div>
+      <div>
+        <h1>AuditBounty</h1>
+        <div class="tag">AUDIT FINDINGS · ON-CHAIN TRIAGE · BRADBURY</div>
+      </div>
+    </div>
+    <div class="wallet">
+      <span class="pill"><span class="dot" id="netDot"></span> <span id="netLabel">not connected</span></span>
+      <button class="solid" id="connectBtn">Connect wallet</button>
+    </div>
+  </header>
+
+  <div class="hero">
+    <h2>Pay for bugs, not for <em>noise</em>. The triage happens <i>in the contract</i>.</h2>
+    <p>
+      A bounty pool pays per accepted finding, so every report needs a human to triage it first.
+      AuditBounty moves that triage on-chain. The project funds a pool; an auditor files a finding
+      with a stake behind it; an on-chain jury fetches the write-up and rules whether it is a real,
+      actionable defect. Valid findings are paid and keep their stake — noise loses it into the pool.
+    </p>
+  </div>
+
+  <div class="stats">
+    <div class="st"><div class="k">BOUNTY POOL</div><div class="n" id="sBounty">—<small>GEN</small></div></div>
+    <div class="st"><div class="k">FINDINGS</div><div class="n" id="sCount">—</div></div>
+    <div class="st"><div class="k">VALID</div><div class="n" id="sValid">—</div></div>
+    <div class="st"><div class="k">SLASHED</div><div class="n" id="sSlash">—<small>GEN</small></div></div>
+  </div>
+
+  <div class="sec">
+    <h3>Findings <span id="listNote">· loading…</span></h3>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input id="jumpId" placeholder="report #" style="width:110px" />
+      <button class="ghost" id="jumpBtn">Open</button>
+      <button class="ghost" id="reloadBtn">Refresh</button>
+    </div>
+  </div>
+  <div class="list" id="list"><div class="empty">Loading findings…</div></div>
+
+  <div class="detail" id="detail">
+    <div class="det">
+      <div class="hd">
+        <div><span class="lbl">FINDING</span><h4 id="dTitle" style="font-size:17px">—</h4></div>
+        <span class="badge b0" id="dState">—</span>
+      </div>
+      <div class="nums" id="dNums"></div>
+      <div class="bar"><i id="dBar" style="width:0%"></i></div>
+      <div class="crit" id="dUrl"></div>
+      <div class="crit" id="dVerdict"></div>
+      <div class="acts">
+        <button class="solid" id="dJudgeBtn">Triage with jury</button>
+        <button class="lime" id="dSettleBtn">Settle stake</button>
+      </div>
+      <div class="msg" id="dMsg"></div>
+    </div>
+  </div>
+
+  <div class="sec"><h3>File a finding <span>· stake required</span></h3></div>
+  <div class="card">
+    <h4>Submit a write-up with a stake behind it <span>· returned if valid, slashed if not</span></h4>
+    <div class="row">
+      <div><label>TITLE</label><input id="fTitle" placeholder="Reentrancy in withdraw() lets an attacker drain balance" /></div>
+      <div><label>SEVERITY</label>
+        <select id="fSev">
+          <option value="critical">critical</option>
+          <option value="high" selected>high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div><label>REPORT URL</label><input id="fUrl" placeholder="https://…" /></div>
+      <div><label>EXPECTED BOUNTY (GEN)</label><input id="fBounty" type="number" step="0.01" placeholder="0.3" /></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div><label>STAKE (GEN)</label><input id="fStake" type="number" step="0.01" placeholder="0.1" /></div>
+      <div style="display:flex;align-items:flex-end"><button class="solid" id="submitBtn">submit_report</button></div>
+    </div>
+    <div class="msg" id="subMsg"></div>
+  </div>
+
+  <div class="sec"><h3>Project side</h3></div>
+  <div class="card">
+    <h4>Fund the bounty pool <span>· anyone can top it up</span></h4>
+    <div class="row">
+      <div><label>AMOUNT (GEN)</label><input id="fFund" type="number" step="0.01" placeholder="0.5" /></div>
+      <div style="display:flex;align-items:flex-end"><button class="solid" id="fundBtn">fund_bounty_pool</button></div>
+    </div>
+    <div class="msg" id="fundMsg"></div>
+  </div>
+  <div class="card">
+    <h4>Withdraw pools <span>· admin only</span></h4>
+    <div class="row">
+      <div><label>AMOUNT (GEN)</label><input id="fWdraw" type="number" step="0.01" placeholder="0.1" /></div>
+      <div style="display:flex;align-items:flex-end"><button class="danger" id="wdrawBtn">withdraw_pool</button></div>
+    </div>
+    <div class="msg" id="wdMsg"></div>
+  </div>
+
+  <div class="sec"><h3>How it works</h3></div>
+  <div class="card">
+    <ol class="steps">
+      <li><b>fund_bounty_pool</b> (payable) — the project puts GEN in the pool that pays valid findings.</li>
+      <li><b>submit_report</b> (payable) — an auditor files a title, severity, write-up URL and expected bounty, and stakes GEN as custody.</li>
+      <li><b>judge_report</b> — the jury fetches the write-up on-chain (gl.nondet.web.get) and rules whether it names a component, states a failure mechanism and gives repro steps (gl.nondet.exec_prompt under consensus). One shot per finding.</li>
+      <li><b>settle_report</b> — exactly once: a valid finding is paid from the pool and keeps its stake; noise has the stake slashed into the pool.</li>
+      <li><b>withdraw_pool</b> — the admin takes slashed stakes and unspent bounty. No stake can be stranded.</li>
+    </ol>
+  </div>
+
+  <footer id="footLinks"></footer>
+</div>
+
+<script type="module">
+import { createClient } from "https://esm.sh/genlayer-js@0.7.0";
+import { testnetBradbury } from "https://esm.sh/genlayer-js@0.7.0/chains";
+
+const ADDR = "0x705c352349db0322AedbCa454eCC31734e54c139";
+const REPO = "https://github.com/coteel/auditbounty";
+const EXPLORER = "https://explorer-bradbury.genlayer.com/address/" + ADDR;
+// ------------------------------------------------------------------------
+
+const RSTATE = ["SUBMITTED", "VALID", "INVALID", "PAID"];
+const $ = (id) => document.getElementById(id);
+const readClient = createClient({ chain: testnetBradbury });
+let writeClient = null, myAddr = null, selected = null, reports = [], adminAddr = null;
+
+const eth = (w) => (Number(w) / 1e18).toFixed(6);
+const short = (a) => (a && a.length > 16) ? a.slice(0, 8) + "…" + a.slice(-6) : a;
+const gen = (gw) => BigInt(Math.round(parseFloat(gw) * 1e6)) * 1000000000000n;
+function msg(el, t, k = "info") { el.className = "msg show " + k; el.textContent = t; }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function renderList() {
+  const el = $("list");
+  if (!reports.length) { el.innerHTML = `<div class="empty">No findings yet — fund the pool and file the first write-up.</div>`; return; }
+  el.innerHTML = reports.map((r) => `
+    <div class="rep ${selected === Number(r.id) ? "sel" : ""}" data-id="${r.id}">
+      <div class="top">
+        <span class="id">FINDING #${r.id}<span class="sevtag sv-${esc(r.severity)}">${esc(r.severity)}</span></span>
+        <span class="badge b${Number(r.state)}">${RSTATE[Number(r.state)] ?? r.state}${r.stake_settled ? " · STAKE SETTLED" : ""}</span>
+      </div>
+      <h4>${esc(r.title)}</h4>
+      <div class="nums">
+        <div>BOUNTY<b class="t">${eth(r.expected_bounty)} GEN</b></div>
+        <div>STAKE<b>${eth(r.stake)} GEN</b></div>
+        <div>SCORE<b>${String(r.score)}/100</b></div>
+        <div>AUDITOR<b>${short(r.auditor)}</b></div>
+      </div>
+    </div>`).join("");
+  el.querySelectorAll(".rep").forEach((c) => c.addEventListener("click", () => openReport(Number(c.dataset.id))));
+}
+
+function renderDetail(r) {
+  selected = Number(r.id);
+  $("detail").classList.add("show");
+  $("dTitle").textContent = `#${r.id} · ${r.title}`;
+  const st = Number(r.state);
+  $("dState").className = "badge b" + st;
+  $("dState").textContent = `${RSTATE[st] ?? st}${r.stake_settled ? " · STAKE SETTLED" : " · STAKE HELD"}`;
+  $("dNums").innerHTML =
+    `<div>AUDITOR<b>${short(r.auditor)}</b></div>` +
+    `<div>SEVERITY<b>${esc(r.severity)}</b></div>` +
+    `<div>BOUNTY<b class="t">${eth(r.expected_bounty)} GEN</b></div>` +
+    `<div>SCORE<b>${String(r.score)}/100</b></div>`;
+  $("dBar").style.width = Math.min(100, Number(r.score)) + "%";
+  $("dUrl").innerHTML = `Report: <a href="${esc(r.report_url)}" target="_blank" rel="noopener">${esc(r.report_url)}</a>`;
+  $("dVerdict").innerHTML = r.verdict_reason
+    ? `Jury: ${esc(r.verdict_reason)}${r.confidence ? ` (confidence: ${esc(r.confidence)})` : ""}`
+    : `Not triaged yet.`;
+  $("dJudgeBtn").disabled = st !== 0;
+  $("dSettleBtn").disabled = st === 0 || st === 3 || r.stake_settled;
+  renderList();
+}
+
+async function loadAll() {
+  try {
+    const p = await readClient.readContract({ address: ADDR, functionName: "get_pools", args: [] });
+    adminAddr = p.admin;
+    const count = Number(p.report_count);
+    reports = [];
+    for (let i = 1; i <= count; i++) {
+      reports.push(await readClient.readContract({ address: ADDR, functionName: "get_report", args: [BigInt(i)] }));
+    }
+    renderList();
+    $("sBounty").innerHTML = `${eth(p.bounty_pool)}<small>GEN</small>`;
+    $("sCount").textContent = count;
+    $("sValid").textContent = reports.filter((r) => Number(r.state) === 1 || Number(r.state) === 3).length;
+    $("sSlash").innerHTML = `${eth(p.slash_pool)}<small>GEN</small>`;
+    $("listNote").textContent = `· ${count} on file`;
+    if (selected) { const r = reports.find((x) => Number(x.id) === selected); if (r) renderDetail(r); }
+  } catch (e) {
+    $("list").innerHTML = `<div class="empty">Could not read findings: ${esc((e.message || e).toString().slice(0, 130))}</div>`;
+  }
+}
+
+async function openReport(id) {
+  try {
+    const r = await readClient.readContract({ address: ADDR, functionName: "get_report", args: [BigInt(id)] });
+    renderDetail(r);
+    $("detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (e) { msg($("dMsg"), "Read failed: " + (e.message || e).toString().slice(0, 160), "err"); }
+}
+
+$("connectBtn").addEventListener("click", async () => {
+  if (!window.ethereum) return msg($("subMsg"), "No wallet detected — install MetaMask.", "err");
+  try {
+    const a = await window.ethereum.request({ method: "eth_requestAccounts" });
+    myAddr = a[0];
+    try { await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x107d" }] }); }
+    catch {
+      await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+        chainId: "0x107d", chainName: "GenLayer Bradbury Testnet",
+        nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 },
+        rpcUrls: ["https://rpc-bradbury.genlayer.com"],
+        blockExplorerUrls: ["https://explorer-bradbury.genlayer.com"],
+      }]});
+    }
+    writeClient = createClient({ chain: testnetBradbury, account: window.ethereum });
+    $("netLabel").textContent = short(myAddr);
+    $("netDot").classList.add("on");
+    $("connectBtn").textContent = "Connected";
+    msg($("subMsg"), "Wallet connected.", "ok");
+  } catch (e) { msg($("subMsg"), "Connect failed: " + e.message, "err"); }
+});
+
+async function write(fn, args, el, label, value = 0n) {
+  if (!writeClient) return msg(el, "Connect your wallet first.", "err");
+  try {
+    msg(el, `${label} → submitting…`, "info");
+    const hash = await writeClient.writeContract({ address: ADDR, functionName: fn, args, value });
+    msg(el, `${label} sent: ${hash}`, "ok");
+    setTimeout(loadAll, 15000);
+  } catch (e) { msg(el, `${label} failed: ` + (e.message || e).toString().slice(0, 220), "err"); }
+}
+
+$("submitBtn").addEventListener("click", () => {
+  const t = $("fTitle").value.trim(), s = $("fSev").value, u = $("fUrl").value.trim(),
+        b = $("fBounty").value, st = $("fStake").value;
+  if (!t || !u || !b || !st) return msg($("subMsg"), "Fill in title, report URL, expected bounty and stake.", "err");
+  write("submit_report", [t, s, u, gen(b)], $("subMsg"), "submit_report", gen(st));
+});
+
+$("fundBtn").addEventListener("click", () => {
+  const g = $("fFund").value;
+  if (!g) return msg($("fundMsg"), "Enter an amount.", "err");
+  write("fund_bounty_pool", [], $("fundMsg"), `fund_bounty_pool (${g} GEN)`, gen(g));
+});
+
+$("dJudgeBtn").addEventListener("click", () => { if (selected) write("judge_report", [BigInt(selected)], $("dMsg"), "judge_report (jury fetches the write-up on-chain)"); });
+$("dSettleBtn").addEventListener("click", () => { if (selected) write("settle_report", [BigInt(selected)], $("dMsg"), "settle_report (pays the bounty or slashes the stake)"); });
+
+$("wdrawBtn").addEventListener("click", () => {
+  const g = $("fWdraw").value;
+  if (!g || !myAddr) return msg($("wdMsg"), "Connect your wallet and enter an amount.", "err");
+  write("withdraw_pool", [gen(g), myAddr], $("wdMsg"), `withdraw_pool (${g} GEN)`);
+});
+
+$("reloadBtn").addEventListener("click", loadAll);
+$("jumpBtn").addEventListener("click", () => { const v = $("jumpId").value; if (v) openReport(Number(v)); });
+
+$("footLinks").innerHTML = `contract <a href="${EXPLORER}" target="_blank" rel="noopener">${ADDR}</a> · <a href="${REPO}" target="_blank" rel="noopener">source</a><br />`;
+loadAll();
+</script>
+</body>
+</html>
