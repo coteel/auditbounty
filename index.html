@@ -129,7 +129,7 @@
       <div class="mark">B</div>
       <div>
         <h1>AuditBounty</h1>
-        <div class="tag">AUDIT FINDINGS · ON-CHAIN TRIAGE · BRADBURY</div>
+        <div class="tag">AUDIT FINDINGS · ON-CHAIN TRIAGE · BRADBURY · build 08-02-pinned</div>
       </div>
     </div>
     <div class="wallet">
@@ -241,8 +241,8 @@
 </div>
 
 <script type="module">
-import { createClient } from "https://esm.sh/genlayer-js@0.7.0";
-import { testnetBradbury } from "https://esm.sh/genlayer-js@0.7.0/chains";
+import { createClient } from "https://esm.sh/genlayer-js@1.1.8";
+import { testnetBradbury } from "https://esm.sh/genlayer-js@1.1.8/chains";
 
 const ADDR = "0x705c352349db0322AedbCa454eCC31734e54c139";
 const REPO = "https://github.com/coteel/auditbounty";
@@ -332,35 +332,128 @@ async function openReport(id) {
 }
 
 $("connectBtn").addEventListener("click", async () => {
-  if (!window.ethereum) return msg($("subMsg"), "No wallet detected — install MetaMask.", "err");
+  // Pick whichever EIP-1193 wallet is present. With several extensions installed the SDK's own
+  // `config.provider || window.ethereum` fallback can land on the wrong one and answer 4100.
+  const cands = [
+    { name: "OKX Wallet", p: window.okxwallet },
+    { name: "MetaMask", p: window.ethereum && window.ethereum.isMetaMask ? window.ethereum : null },
+    { name: "Rabby", p: window.ethereum && window.ethereum.isRabby ? window.ethereum : null },
+    { name: "injected", p: window.ethereum },
+  ];
+  const found = cands.find((c) => c.p && c.p.request);
+  if (!found) {
+    msg($("subMsg"), "No wallet found. Install OKX Wallet or MetaMask, and open this page over https — wallets do not inject into file:// pages.", "err");
+    return;
+  }
+  const wname = found.name;
+  const prov = found.p;
+  $("connectBtn").textContent = "Connecting…";
   try {
-    const a = await window.ethereum.request({ method: "eth_requestAccounts" });
+    const a = await prov.request({ method: "eth_requestAccounts" });
+    if (!a || !a.length) throw new Error("Your wallet returned no account.");
     myAddr = a[0];
-    try { await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x107d" }] }); }
-    catch {
-      await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
-        chainId: "0x107d", chainName: "GenLayer Bradbury Testnet",
-        nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 },
-        rpcUrls: ["https://rpc-bradbury.genlayer.com"],
-        blockExplorerUrls: ["https://explorer-bradbury.genlayer.com"],
-      }]});
+
+    // Network first: switch, and add the chain when the wallet does not know it yet.
+    try {
+      await prov.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x107d" }] });
+    } catch (e) {
+      if (e && e.code === 4902) {
+        await prov.request({ method: "wallet_addEthereumChain", params: [{
+          chainId: "0x107d", chainName: "GenLayer Bradbury Testnet",
+          nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 },
+          rpcUrls: ["https://rpc-bradbury.genlayer.com"],
+          blockExplorerUrls: ["https://explorer-bradbury.genlayer.com"],
+        }] });
+      } else { throw e; }
     }
-    writeClient = createClient({ chain: testnetBradbury, account: window.ethereum });
+    const cid = await prov.request({ method: "eth_chainId" });
+    if (cid !== "0x107d") {
+      msg($("subMsg"), `Wallet is on chain ${parseInt(cid, 16)} but this app needs Bradbury (4221). Switch it in the wallet and connect again.`, "err");
+      $("connectBtn").textContent = "Connect wallet";
+      return;
+    }
+
+    // Pinned provider: wrap it so the SDK has nothing to fall back to.
+    const forced = { request: (args) => prov.request(args) };
+    if (prov.on) forced.on = (...x) => prov.on(...x);
+    if (prov.removeListener) forced.removeListener = (...x) => prov.removeListener(...x);
+
+    usingLocalKey = false;
+    writeClient = createClient({ chain: testnetBradbury, provider: forced });
+
     $("netLabel").textContent = short(myAddr);
     $("netDot").classList.add("on");
     $("connectBtn").textContent = "Connected";
-    msg($("subMsg"), "Wallet connected.", "ok");
-  } catch (e) { msg($("subMsg"), "Connect failed: " + e.message, "err"); }
-});
+
+    // Show the balance the chain reports, not the wallet's cache.
+    let bal = "";
+    try {
+      const raw = await readClient.getBalance({ address: myAddr });
+      if (raw !== null && raw !== undefined) bal = " · " + (Number(raw) / 1e18).toFixed(4) + " GEN";
+    } catch (e) { /* ignore */ }
+    msg($("subMsg"), wname + " connected on Bradbury · " + short(myAddr) + bal, "ok");
+
+    if (prov.on) {
+      prov.on("accountsChanged", (accs) => {
+        myAddr = accs && accs.length ? accs[0] : null;
+        writeClient = null;
+        $("connectBtn").textContent = myAddr ? "Connected" : "Connect wallet";
+        $("netLabel").textContent = myAddr ? short(myAddr) : "not connected";
+        if (!myAddr) $("netDot").classList.remove("on");
+      });
+      prov.on("chainChanged", () => window.location.reload());
+    }
+    if (typeof loadAll === "function") await loadAll();
+  } catch (e) {
+    $("connectBtn").textContent = "Connect wallet";
+    const c = e && (e.code !== undefined ? e.code : (e.cause && e.cause.code));
+    let hint = "";
+    if (c === 4001) hint = " [4001: you rejected the request in the wallet]";
+    else if (c === -32002) hint = " [-32002: a request is already open in the wallet — open it and confirm]";
+    else if (c === 4902) hint = " [4902: the wallet does not have the Bradbury chain]";
+    else if (c === 4100) hint = " [4100: the wallet has not authorised this account — reconnect and make sure the active account is the one holding GEN]";
+    msg($("subMsg"), "Connect failed: " + String((e && e.message) || e).slice(0, 180) + hint, "err");
+  }
+});;
 
 async function write(fn, args, el, label, value = 0n) {
   if (!writeClient) return msg(el, "Connect your wallet first.", "err");
   try {
-    msg(el, `${label} → submitting…`, "info");
-    const hash = await writeClient.writeContract({ address: ADDR, functionName: fn, args, value });
-    msg(el, `${label} sent: ${hash}`, "ok");
-    setTimeout(loadAll, 15000);
-  } catch (e) { msg(el, `${label} failed: ` + (e.message || e).toString().slice(0, 220), "err"); }
+    msg(el, `${label} → confirm in your wallet…`, "info");
+    // Wallet path needs an account object so the SDK can fill `from`; the local-key path
+    // signs with the client's own private-key account and must not be overridden.
+    const call = { address: ADDR, functionName: fn, args, value };
+    if (!usingLocalKey && myAddr) call.account = { address: myAddr, type: "json-rpc" };
+    const hash = await writeClient.writeContract(call);
+    msg(el, `${label} submitted (${short(hash)}) — waiting for finalization…`, "info");
+
+    // A hash is not success. Wait for the receipt and check the execution result.
+    for (let i = 0; i < 80; i++) {
+      await new Promise((r) => setTimeout(r, 15000));
+      let tx = null;
+      try { tx = await readClient.getTransaction({ hash }); } catch (e) { continue; }
+      if (!tx) continue;
+      const st = String(tx.statusName || tx.status || "");
+      if (st === "FINALIZED" || st === "ACCEPTED") {
+        const res = String(tx.txExecutionResultName || "");
+        if (res === "FINISHED_WITH_RETURN") {
+          msg(el, `${label} confirmed · ${res} · ${short(hash)}`, "ok");
+          if (typeof loadAll === "function") await loadAll();
+        } else {
+          msg(el, `${label} executed but returned ${res || "an error"} · ${short(hash)}`, "err");
+        }
+        return;
+      }
+      if (st === "UNDETERMINED" || st === "LEADER_TIMEOUT") {
+        msg(el, `${label} could not reach consensus. It may still land — check the explorer. ${short(hash)}`, "err");
+        return;
+      }
+    }
+    msg(el, `${label} is taking long. Hash ${short(hash)} — check the explorer before retrying.`, "info");
+  } catch (e) {
+    const c = e && (e.code !== undefined ? e.code : (e.cause && e.cause.code));
+    msg(el, `${label} failed: ` + String((e && e.message) || e).slice(0, 220) + (c !== undefined && c !== null ? ` [${c}]` : ""), "err");
+  }
 }
 
 $("submitBtn").addEventListener("click", () => {
