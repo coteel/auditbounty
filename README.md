@@ -129,6 +129,31 @@ paid out of it with its stake returned, a noise finding has its stake slashed, a
 withdrawn. See `_提交材料.md` and the `ab_audit.txt` / `ab_evidence.txt` fields for the transaction
 hashes produced by that run.
 
+### Browser wallet path
+
+The web UI is not a mock: a browser wallet signs the transaction and the contract state changes.
+
+Transaction 0x9a16f82ed8a25d6fb02238007e0dee6cd387f6e6bbe6c7d3dc39260e6a01728a
+
+- from `0x78Da4D6BD4264712df1c38Bd4f10AABD944963F6` — the connected browser wallet, not a local script key
+- method `fund_bounty_pool`, `value` 0.5 GEN, execution result `FINISHED_WITH_RETURN`
+- the contract received the 0.5 GEN, so the call really landed
+- EVM block 25853237
+
+The signing path in `index.html`:
+
+- `createClient` is **not** given `window.ethereum` as the account. The connected address is supplied
+  per call as a JSON-RPC account object `{address, type:"json-rpc"}`, and the signing provider is
+  wrapped so the SDK cannot fall back to `window.ethereum`. With more than one extension installed
+  that fallback answers `4100 unauthorised` and the wallet never signs.
+- `pickProvider()` prefers OKX (`window.okxwallet`) and then MetaMask / Rabby / any injected provider,
+  so the wallet the user actually connected with is the one that signs.
+- `wallet_switchEthereumChain` runs before every write. `4902` triggers `wallet_addEthereumChain`, and
+  `4001` / `-32002` / `4100` each map to an explicit message instead of a silent failure.
+  `eth_chainId` is compared against `4221` before anything is signed.
+- A transaction hash is never treated as success: the receipt is awaited to `ACCEPTED` / `FINALIZED`
+  and the execution result is checked first.
+
 ---
 
 ## License
