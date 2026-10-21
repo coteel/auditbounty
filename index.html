@@ -251,6 +251,7 @@ const EXPLORER = "https://explorer-bradbury.genlayer.com/address/" + ADDR;
 
 const RSTATE = ["SUBMITTED", "VALID", "INVALID", "PAID"];
 const $ = (id) => document.getElementById(id);
+let usingLocalKey = false;
 const readClient = createClient({ chain: testnetBradbury });
 let writeClient = null, myAddr = null, selected = null, reports = [], adminAddr = null;
 
