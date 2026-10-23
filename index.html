@@ -129,7 +129,7 @@
       <div class="mark">B</div>
       <div>
         <h1>AuditBounty</h1>
-        <div class="tag">AUDIT FINDINGS · ON-CHAIN TRIAGE · BRADBURY · build 08-02-pinned</div>
+        <div class="tag">AUDIT FINDINGS · ON-CHAIN TRIAGE · BRADBURY · build 08-02-scoped</div>
       </div>
     </div>
     <div class="wallet">
@@ -178,15 +178,21 @@
       <div class="acts">
         <button class="solid" id="dJudgeBtn">Triage with jury</button>
         <button class="lime" id="dSettleBtn">Settle stake</button>
+        <button id="dActivateBtn" style="display:none">Activate (pool can now cover it)</button>
+        <button id="dReclaimBtn" style="display:none">Reclaim my stake</button>
       </div>
       <div class="msg" id="dMsg"></div>
     </div>
   </div>
 
-  <div class="sec"><h3>File a finding <span>· stake required</span></h3></div>
+  <div class="sec"><h3>File a finding <span>· scoped to a project and revision · stake required</span></h3></div>
   <div class="card">
     <h4>Submit a write-up with a stake behind it <span>· returned if valid, slashed if not</span></h4>
     <div class="row">
+      <div><label>PROJECT ID</label><input id="fProject" placeholder="acme-vault" /></div>
+      <div><label>SOURCE REVISION</label><input id="fRev" placeholder="commit 9f2c1a7 or v1.2.3" /></div>
+    </div>
+    <div class="row" style="margin-top:10px">
       <div><label>TITLE</label><input id="fTitle" placeholder="Reentrancy in withdraw() lets an attacker drain balance" /></div>
       <div><label>SEVERITY</label>
         <select id="fSev">
@@ -199,11 +205,15 @@
     </div>
     <div class="row" style="margin-top:10px">
       <div><label>REPORT URL</label><input id="fUrl" placeholder="https://…" /></div>
-      <div><label>EXPECTED BOUNTY (GEN)</label><input id="fBounty" type="number" step="0.01" placeholder="0.3" /></div>
+      <div><label>EVIDENCE DIGEST (hash of the write-up)</label><input id="fDigest" placeholder="sha256 of the report payload" /></div>
     </div>
     <div class="row" style="margin-top:10px">
-      <div><label>STAKE (GEN)</label><input id="fStake" type="number" step="0.01" placeholder="0.1" /></div>
+      <div><label>EXPECTED BOUNTY (GEN)</label><input id="fBounty" type="number" step="0.01" placeholder="0.3" /></div>
+      <div><label>STAKE (GEN) <span style="opacity:.6">0.01–10</span></label><input id="fStake" type="number" step="0.01" placeholder="0.1" /></div>
+    </div>
+    <div class="row" style="margin-top:10px">
       <div style="display:flex;align-items:flex-end"><button class="solid" id="submitBtn">submit_report</button></div>
+      <div></div>
     </div>
     <div class="msg" id="subMsg"></div>
   </div>
@@ -230,10 +240,12 @@
   <div class="card">
     <ol class="steps">
       <li><b>fund_bounty_pool</b> (payable) — the project puts GEN in the pool that pays valid findings.</li>
-      <li><b>submit_report</b> (payable) — an auditor files a title, severity, write-up URL and expected bounty, and stakes GEN as custody.</li>
-      <li><b>judge_report</b> — the jury fetches the write-up on-chain (gl.nondet.web.get) and rules whether it names a component, states a failure mechanism and gives repro steps (gl.nondet.exec_prompt under consensus). One shot per finding.</li>
+      <li><b>submit_report</b> (payable) — a finding is scoped to a <b>project</b> and a <b>source revision</b> and locked to an <b>evidence digest</b>. The stake must sit between 0.01 and 10 GEN, and the claim may not exceed 100x the stake. The same digest in the same revision can only be on file once, so one defect can never be farmed twice.</li>
+      <li><b>judge_report</b> — the jury fetches the write-up on-chain (gl.nondet.web.get) and rules whether it names a component, states a failure mechanism and gives repro steps. An approval is immediately recorded as <b>committed</b>, which the admin can no longer withdraw; if the pool cannot cover it the finding becomes <b>UNFUNDED</b> instead of silently vanishing.</li>
       <li><b>settle_report</b> — exactly once: a valid finding is paid from the pool and keeps its stake; noise has the stake slashed into the pool.</li>
-      <li><b>withdraw_pool</b> — the admin takes slashed stakes and unspent bounty. No stake can be stranded.</li>
+      <li><b>activate_unfunded</b> — after a top-up, an UNFUNDED approval can be promoted to payable by anyone.</li>
+      <li><b>reclaim_stake</b> — the auditor always gets out: on demand when the pool could not fund the finding, or once a filed report has sat unjudged past the 7-day window. Reclaiming returns the stake and voids the claim.</li>
+      <li><b>withdraw_pool</b> — the admin takes slashed stakes and only the <i>uncommitted</i> bounty. Money already owed to an auditor cannot be withdrawn.</li>
     </ol>
   </div>
 
@@ -244,12 +256,12 @@
 import { createClient } from "https://esm.sh/genlayer-js@1.1.8";
 import { testnetBradbury } from "https://esm.sh/genlayer-js@1.1.8/chains";
 
-const ADDR = "0x705c352349db0322AedbCa454eCC31734e54c139";
+const ADDR = "0xb5549acCFB36668485CE27f8Eaf66c28D7B3b404";
 const REPO = "https://github.com/coteel/auditbounty";
 const EXPLORER = "https://explorer-bradbury.genlayer.com/address/" + ADDR;
 // ------------------------------------------------------------------------
 
-const RSTATE = ["SUBMITTED", "VALID", "INVALID", "PAID"];
+const RSTATE = ["SUBMITTED", "VALID", "INVALID", "PAID", "UNFUNDED", "WITHDRAWN"];
 const $ = (id) => document.getElementById(id);
 let usingLocalKey = false;
 const readClient = createClient({ chain: testnetBradbury });
@@ -294,12 +306,18 @@ function renderDetail(r) {
     `<div>BOUNTY<b class="t">${eth(r.expected_bounty)} GEN</b></div>` +
     `<div>SCORE<b>${String(r.score)}/100</b></div>`;
   $("dBar").style.width = Math.min(100, Number(r.score)) + "%";
-  $("dUrl").innerHTML = `Report: <a href="${esc(r.report_url)}" target="_blank" rel="noopener">${esc(r.report_url)}</a>`;
+  $("dUrl").innerHTML =
+    `Scope: <b>${esc(r.project_id)}</b> @ <b>${esc(r.source_revision)}</b>` +
+    `<br>Report: <a href="${esc(r.report_url)}" target="_blank" rel="noopener">${esc(r.report_url)}</a>` +
+    `<br>Evidence digest: <code>${esc(String(r.evidence_digest || "").slice(0, 24))}…</code>`;
   $("dVerdict").innerHTML = r.verdict_reason
     ? `Jury: ${esc(r.verdict_reason)}${r.confidence ? ` (confidence: ${esc(r.confidence)})` : ""}`
     : `Not triaged yet.`;
   $("dJudgeBtn").disabled = st !== 0;
-  $("dSettleBtn").disabled = st === 0 || st === 3 || r.stake_settled;
+  $("dSettleBtn").disabled = st === 0 || st === 3 || st === 5 || r.stake_settled;
+  // UNFUNDED can be activated once the pool covers it; UNFUNDED or an overdue SUBMITTED can be reclaimed
+  $("dActivateBtn").style.display = st === 4 ? "" : "none";
+  $("dReclaimBtn").style.display = (st === 4 || (st === 0 && r.overdue)) ? "" : "none";
   renderList();
 }
 
@@ -458,10 +476,20 @@ async function write(fn, args, el, label, value = 0n) {
 }
 
 $("submitBtn").addEventListener("click", () => {
-  const t = $("fTitle").value.trim(), s = $("fSev").value, u = $("fUrl").value.trim(),
+  const pj = $("fProject").value.trim(), rv = $("fRev").value.trim(),
+        t = $("fTitle").value.trim(), s = $("fSev").value, u = $("fUrl").value.trim(),
+        dg = $("fDigest").value.trim(),
         b = $("fBounty").value, st = $("fStake").value;
-  if (!t || !u || !b || !st) return msg($("subMsg"), "Fill in title, report URL, expected bounty and stake.", "err");
-  write("submit_report", [t, s, u, gen(b)], $("subMsg"), "submit_report", gen(st));
+  if (!pj || !rv || !t || !u || !dg || !b || !st)
+    return msg($("subMsg"), "Fill in project, revision, title, report URL, evidence digest, expected bounty and stake.", "err");
+  if (dg.length < 16) return msg($("subMsg"), "The evidence digest must be at least 16 characters.", "err");
+  const stakeGen = Number(st), bountyGen = Number(b);
+  if (stakeGen < 0.01 || stakeGen > 10)
+    return msg($("subMsg"), "The stake must be between 0.01 and 10 GEN.", "err");
+  if (bountyGen <= 0) return msg($("subMsg"), "The expected bounty must be positive.", "err");
+  if (bountyGen > stakeGen * 100)
+    return msg($("subMsg"), "The expected bounty cannot exceed 100x the stake.", "err");
+  write("submit_report", [pj, rv, t, s, u, dg, gen(b)], $("subMsg"), "submit_report", gen(st));
 });
 
 $("fundBtn").addEventListener("click", () => {
@@ -472,6 +500,8 @@ $("fundBtn").addEventListener("click", () => {
 
 $("dJudgeBtn").addEventListener("click", () => { if (selected) write("judge_report", [BigInt(selected)], $("dMsg"), "judge_report (jury fetches the write-up on-chain)"); });
 $("dSettleBtn").addEventListener("click", () => { if (selected) write("settle_report", [BigInt(selected)], $("dMsg"), "settle_report (pays the bounty or slashes the stake)"); });
+$("dActivateBtn").addEventListener("click", () => { if (selected) write("activate_unfunded", [BigInt(selected)], $("dMsg"), "activate_unfunded (the pool can now cover this grant)"); });
+$("dReclaimBtn").addEventListener("click", () => { if (selected) write("reclaim_stake", [BigInt(selected)], $("dMsg"), "reclaim_stake (returns the stake and voids the claim)"); });
 
 $("wdrawBtn").addEventListener("click", () => {
   const g = $("fWdraw").value;
