@@ -3,12 +3,18 @@
 
 Run: pytest tests/direct/ -v
 
-Note: the direct VM does not model the contract's own GEN balance, so these tests assert the
-contract's internal accounting (bounty pool / stakes). The real movement of GEN is verified
+The direct VM does not model the contract's own GEN balance, so these tests assert the contract's
+internal accounting (bounty pool / committed / stakes). The real movement of GEN is verified
 end-to-end on Bradbury.
+
+Amount unit: B = 0.001 GEN. Stake bounds are 0.01 GEN .. 10 GEN, so a normal report stakes 100*B.
 """
 
 B = 1000000000000000        # 0.001 GEN
+STAKE = 100 * B             # 0.1 GEN
+BOUNTY = 400 * B            # 0.4 GEN
+POOL = 1000 * B             # 1 GEN
+DIGEST = "9f2c1a7be0d34f568192ab34cd56ef7890ab12cd34ef56789012ab34cd56ef78"
 
 
 def _deploy(direct_vm, direct_deploy, admin):
@@ -25,6 +31,10 @@ def _deploy(direct_vm, direct_deploy, admin):
 
 def _addr(v):
     from genlayer import Address
+    if isinstance(v, (bytes, bytearray)):
+        return Address("0x" + bytes(v).hex())
+    if isinstance(v, str) and not v.startswith("0x"):
+        return Address("0x" + v)
     return Address(v)
 
 
@@ -36,12 +46,27 @@ def _fund(direct_vm, c, who, amount):
 
 
 def _report(direct_vm, c, who, title="Reentrancy in withdraw", severity="high",
-            url="https://example.com/report", bounty=400, stake=100):
+            url="https://example.com/report", bounty=BOUNTY, stake=STAKE,
+            project="acme-vault", revision="v1.2.3", digest=DIGEST):
     direct_vm.sender = who
     direct_vm.value = stake
-    rid = c.submit_report(title, severity, url, bounty)
+    rid = c.submit_report(project, revision, title, severity, url, digest, bounty)
     direct_vm.value = 0
     return rid
+
+
+def _mock_valid(direct_vm, score=90):
+    direct_vm.mock_web(".*", {"status": 200, "body": "x" * 300})
+    direct_vm.mock_llm(".*", {"valid": True, "score": score,
+                              "reason": "names the component, the mechanism and the steps",
+                              "confidence": "high"})
+
+
+def _mock_invalid(direct_vm):
+    direct_vm.mock_web(".*", {"status": 200, "body": "x" * 300})
+    direct_vm.mock_llm(".*", {"valid": False, "score": 10,
+                              "reason": "generic advice with no defect",
+                              "confidence": "high"})
 
 
 # ------------------------------------------------- 1. pool funding ----
@@ -56,246 +81,435 @@ def test_fund_pool_requires_value(direct_vm, direct_deploy, direct_alice):
 
 def test_pool_tracks_funding(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-    _fund(direct_vm, c, direct_bob, 500)
+    _fund(direct_vm, c, direct_alice, POOL)
+    _fund(direct_vm, c, direct_bob, POOL // 2)
     p = c.get_pools()
-    assert int(p["bounty_pool"]) == 1500
+    assert int(p["bounty_pool"]) == POOL + POOL // 2
     assert int(p["slash_pool"]) == 0
+    assert int(p["committed"]) == 0
 
 
-# ------------------------------------------------- 2. filing ----
+# ------------------------------- 2. REVIEW: binding to project + revision ----
+
+def test_finding_must_name_a_project(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: bind findings to a defined project."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("A project id is required"):
+        c.submit_report("   ", "v1.0.0", "Reentrancy", "high",
+                        "https://example.com/r", DIGEST, BOUNTY)
+    direct_vm.value = 0
+
+
+def test_finding_must_name_a_source_revision(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: bind findings to a source revision."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("A source revision"):
+        c.submit_report("acme-vault", "", "Reentrancy", "high",
+                        "https://example.com/r", DIGEST, BOUNTY)
+    direct_vm.value = 0
+
+
+def test_report_records_scope_and_revision(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    rid = _report(direct_vm, c, direct_bob, project="acme-vault", revision="commit-abc123")
+    r = c.get_report(rid)
+    assert r["project_id"] == "acme-vault"
+    assert r["source_revision"] == "commit-abc123"
+    assert r["evidence_digest"] == DIGEST
+
+
+# ------------------------- 3. REVIEW: independently verifiable evidence ----
+
+def test_evidence_digest_is_required(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: requiring independently verifiable defect evidence."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("evidence digest"):
+        c.submit_report("acme-vault", "v1.0.0", "Reentrancy", "high",
+                        "https://example.com/r", "short", BOUNTY)
+    direct_vm.value = 0
+
+
+# ------------------------------------- 4. REVIEW: duplicate payouts ----
+
+def test_same_digest_cannot_be_filed_twice(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: preventing duplicate payouts on the same defect."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _report(direct_vm, c, direct_bob)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("already on file"):
+        c.submit_report("acme-vault", "v1.2.3", "Same bug again", "high",
+                        "https://example.com/r2", DIGEST, BOUNTY)
+    direct_vm.value = 0
+
+
+def test_same_digest_allowed_after_rejection(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A rejected finding frees the digest: it was not paid, so it can be argued again."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_invalid(direct_vm)
+    c.judge_report(rid)
+    assert int(c.get_report(rid)["state"]) == 2          # INVALID
+    rid2 = _report(direct_vm, c, direct_bob, title="Re-filed with reproduction steps")
+    assert int(rid2) == 2
+
+
+def test_digest_is_scoped_to_revision(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """The same defect digest in a different revision is a different claim."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _report(direct_vm, c, direct_bob, revision="v1.0.0")
+    rid2 = _report(direct_vm, c, direct_bob, revision="v2.0.0")
+    assert int(rid2) == 2
+
+
+def test_claim_lookup_exposes_the_binding(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    assert int(c.get_claim("acme-vault", "v1.2.3", DIGEST)) == 0
+    rid = _report(direct_vm, c, direct_bob)
+    assert int(c.get_claim("acme-vault", "v1.2.3", DIGEST)) == int(rid)
+
+
+# -------------------------------- 5. REVIEW: bounded stake and bounty ----
+
+def test_stake_below_minimum_rejected(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: enforcing bounded stake rules."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = B                 # 0.001 GEN, below the 0.01 GEN floor
+    with direct_vm.expect_revert("below the minimum"):
+        c.submit_report("acme-vault", "v1", "Bug", "high", "https://e.com/r", DIGEST, BOUNTY)
+    direct_vm.value = 0
+
+
+def test_stake_above_maximum_rejected(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = 11 * 10 ** 18     # 11 GEN, above the 10 GEN ceiling
+    with direct_vm.expect_revert("above the maximum"):
+        c.submit_report("acme-vault", "v1", "Bug", "high", "https://e.com/r", DIGEST, BOUNTY)
+    direct_vm.value = 0
+
+
+def test_bounty_above_maximum_rejected(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("above the maximum"):
+        c.submit_report("acme-vault", "v1", "Bug", "high", "https://e.com/r", DIGEST,
+                        101 * 10 ** 18)
+    direct_vm.value = 0
+
+
+def test_bounty_capped_relative_to_stake(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A claim cannot be inflated far beyond the stake backing it."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE             # 0.1 GEN
+    with direct_vm.expect_revert("allowed multiple of the stake"):
+        c.submit_report("acme-vault", "v1", "Bug", "high", "https://e.com/r", DIGEST,
+                        101 * STAKE)
+    direct_vm.value = 0
+
+
+def test_bounty_below_minimum_rejected(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("below the minimum"):
+        c.submit_report("acme-vault", "v1", "Bug", "high", "https://e.com/r", DIGEST, 0)
+    direct_vm.value = 0
+
 
 def test_submit_requires_stake(direct_vm, direct_deploy, direct_alice):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
     direct_vm.sender = direct_alice
     direct_vm.value = 0
-    with direct_vm.expect_revert("A stake is required"):
-        c.submit_report("Reentrancy", "high", "https://example.com/r", 400)
+    with direct_vm.expect_revert("below the minimum"):
+        c.submit_report("acme-vault", "v1", "Bug", "high", "https://e.com/r", DIGEST, BOUNTY)
 
 
 def test_submit_input_validation(direct_vm, direct_deploy, direct_alice):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
     direct_vm.sender = direct_alice
-    direct_vm.value = 100
+    direct_vm.value = STAKE
     with direct_vm.expect_revert("Title is required"):
-        c.submit_report("", "high", "https://example.com/r", 400)
+        c.submit_report("acme-vault", "v1", "", "high", "https://e.com/r", DIGEST, BOUNTY)
     with direct_vm.expect_revert("Severity must be"):
-        c.submit_report("Bug", "urgent", "https://example.com/r", 400)
+        c.submit_report("acme-vault", "v1", "Bug", "urgent", "https://e.com/r", DIGEST, BOUNTY)
     with direct_vm.expect_revert("A valid report URL is required"):
-        c.submit_report("Bug", "high", "not-a-url", 400)
-    with direct_vm.expect_revert("Expected bounty must be positive"):
-        c.submit_report("Bug", "high", "https://example.com/r", 0)
+        c.submit_report("acme-vault", "v1", "Bug", "high", "not-a-url", DIGEST, BOUNTY)
     direct_vm.value = 0
 
 
 def test_report_booked_as_custody(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=400)
+    rid = _report(direct_vm, c, direct_bob)
     r = c.get_report(rid)
     assert r["title"] == "Reentrancy in withdraw"
     assert r["severity"] == "high"
-    assert int(r["stake"]) == 100
-    assert int(r["expected_bounty"]) == 400
+    assert int(r["stake"]) == STAKE
+    assert int(r["expected_bounty"]) == BOUNTY
     assert int(r["state"]) == 0                # SUBMITTED
-    assert r["stake_settled"] is False
-    assert int(c.get_report_count()) == 1
+    assert int(r["filed_at"]) > 0
 
 
-# ------------------------------------------------- 3. triage ----
+# ------------------------------------------------- 6. judging ----
 
 def test_judge_requires_report(direct_vm, direct_deploy, direct_alice):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    direct_vm.sender = direct_alice
     with direct_vm.expect_revert("Report not found"):
-        c.judge_report(9)
+        c.judge_report(99)
 
 
 def test_judge_is_one_shot(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, POOL)
     rid = _report(direct_vm, c, direct_bob)
-    direct_vm.mock_web(r".*example\.com.*",
-                       {"status": 200, "body": "<html>reentrancy in withdraw: state updated after external call, repro steps included</html>"})
-    direct_vm.mock_llm(r".*", {"valid": True, "score": 88,
-                               "reason": "Specific component, mechanism and repro steps.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    _mock_valid(direct_vm)
     c.judge_report(rid)
-    with direct_vm.expect_revert("Report has already been judged"):
+    with direct_vm.expect_revert("already been judged"):
         c.judge_report(rid)
 
 
 def test_unreachable_report_is_invalid(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, POOL)
     rid = _report(direct_vm, c, direct_bob)
-    direct_vm.mock_web(r".*", {"status": 404, "body": ""})
-    direct_vm.mock_llm(r".*", {"valid": False, "score": 5,
-                               "reason": "The report could not be fetched.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    direct_vm.mock_web(".*", {"status": 500, "body": ""})
+    direct_vm.mock_llm(".*", {"valid": False, "score": 0,
+                              "reason": "cannot be fetched", "confidence": "high"})
     c.judge_report(rid)
-    r = c.get_report(rid)
-    assert int(r["state"]) == 2                # INVALID
-    assert int(r["score"]) == 5
+    assert int(c.get_report(rid)["state"]) == 2
 
 
 def test_score_is_clamped(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, POOL)
     rid = _report(direct_vm, c, direct_bob)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>detailed defect</html>"})
-    direct_vm.mock_llm(r".*", {"valid": True, "score": 9999,
-                               "reason": "Solid.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    direct_vm.mock_web(".*", {"status": 200, "body": "x" * 300})
+    direct_vm.mock_llm(".*", {"valid": True, "score": 250,
+                              "reason": "clear defect with reproduction", "confidence": "high"})
     c.judge_report(rid)
     assert int(c.get_report(rid)["score"]) == 100
 
 
-# ------------------------------------------------- 4. settlement ----
+# ------------- 7. REVIEW: approved payouts protected from withdrawals ----
+
+def test_approval_is_recorded_as_committed(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: protect approved payouts from administrator withdrawals."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, POOL)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    p = c.get_pools()
+    assert int(c.get_report(rid)["state"]) == 1          # VALID
+    assert int(p["committed"]) == BOUNTY
+    assert int(p["withdrawable"]) == POOL - BOUNTY
+
+
+def test_admin_cannot_withdraw_committed_payout(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """The pool has money, but it is already owed: withdrawing it must revert."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, POOL)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("uncommitted"):
+        c.withdraw_pool(POOL, _addr(direct_alice))
+    # only the uncommitted remainder is reachable
+    c.withdraw_pool(POOL - BOUNTY, _addr(direct_alice))
+    direct_vm.value = 0
+
+
+def test_withdraw_pool_admin_only(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, POOL)
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("Only the project admin"):
+        c.withdraw_pool(B, _addr(direct_bob))
+
+
+# ---------- 8. REVIEW: unfunded / timeout recovery with stake intact ----
+
+def test_underfunded_approval_becomes_unfunded(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: safe recovery for underfunded reports."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, BOUNTY // 2)      # cannot cover the claim
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    assert int(c.get_report(rid)["state"]) == 4         # UNFUNDED
+    assert int(c.get_pools()["committed"]) == 0         # nothing was promised
+
+
+def test_unfunded_stake_can_always_be_reclaimed(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """The auditor is never trapped: an unfunded approval refunds the stake on demand."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, BOUNTY // 2)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    direct_vm.sender = direct_bob
+    c.reclaim_stake(rid)
+    r = c.get_report(rid)
+    assert int(r["state"]) == 5                          # WITHDRAWN
+    assert r["stake_settled"] is True
+
+
+def test_unfunded_can_be_activated_after_top_up(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, BOUNTY // 2)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    assert int(c.get_report(rid)["state"]) == 4
+    _fund(direct_vm, c, direct_alice, POOL)
+    c.activate_unfunded(rid)
+    assert int(c.get_report(rid)["state"]) == 1
+    assert int(c.get_pools()["committed"]) == BOUNTY
+
+
+def test_reclaim_is_auditor_only(direct_vm, direct_deploy, direct_alice, direct_bob):
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, BOUNTY // 2)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("Only the auditor"):
+        c.reclaim_stake(rid)
+
+
+def test_stale_report_can_be_refunded_after_timeout(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Regression for: safe timeout recovery for unresolved reports."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    rid = _report(direct_vm, c, direct_bob)
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("still within the judging window"):
+        c.reclaim_stake(rid)
+    # 8 days later the judging window has expired
+    direct_vm.warp("2026-11-30T00:00:00.000Z")
+    direct_vm.sender = direct_bob
+    c.reclaim_stake(rid)
+    assert int(c.get_report(rid)["state"]) == 5
+    assert c.get_report(rid)["stake_settled"] is True
+
+
+def test_reclaim_voids_the_claim(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A reclaimed digest cannot be paid later, and is free to be argued again."""
+    c = _deploy(direct_vm, direct_deploy, direct_alice)
+    _fund(direct_vm, c, direct_alice, BOUNTY // 2)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    direct_vm.sender = direct_bob
+    c.reclaim_stake(rid)
+    assert int(c.get_claim("acme-vault", "v1.2.3", DIGEST)) == 0
+    rid2 = _report(direct_vm, c, direct_bob, title="Re-filed after reclaim")
+    assert int(rid2) == 2
+
+
+# ------------------------------------------------- 9. settlement ----
 
 def test_valid_report_paid_and_stake_returned(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=400)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>actionable defect with repro</html>"})
-    direct_vm.mock_llm(r".*", {"valid": True, "score": 90,
-                               "reason": "Actionable.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    _fund(direct_vm, c, direct_alice, POOL)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
     c.judge_report(rid)
-
-    # only the admin settles
-    direct_vm.sender = direct_bob
-    c.settle_report(rid)                        # settle itself is permissionless
+    c.settle_report(rid)
     r = c.get_report(rid)
-    assert int(r["state"]) == 3                # PAID
+    assert int(r["state"]) == 3                          # PAID
     assert r["stake_settled"] is True
-    # 1000 pool - 400 bounty = 600; nothing slashed
     p = c.get_pools()
-    assert int(p["bounty_pool"]) == 600
-    assert int(p["slash_pool"]) == 0
+    assert int(p["bounty_pool"]) == POOL - BOUNTY
+    assert int(p["committed"]) == 0                       # commitment released on payment
 
 
 def test_invalid_report_stake_slashed(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=400)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>just use better variable names</html>"})
-    direct_vm.mock_llm(r".*", {"valid": False, "score": 10,
-                               "reason": "Style opinion, no defect.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    _fund(direct_vm, c, direct_alice, POOL)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_invalid(direct_vm)
     c.judge_report(rid)
     c.settle_report(rid)
-
     p = c.get_pools()
-    assert int(p["slash_pool"]) == 100         # stake forfeited
-    assert int(p["bounty_pool"]) == 1000       # untouched
-    assert c.get_report(rid)["stake_settled"] is True
+    assert int(p["slash_pool"]) == STAKE
+    assert int(p["bounty_pool"]) == POOL
+    assert int(c.get_report(rid)["state"]) == 3
 
 
 def test_settle_requires_judgement(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
     rid = _report(direct_vm, c, direct_bob)
-    direct_vm.sender = direct_alice
-    with direct_vm.expect_revert("Report has not been judged yet"):
+    with direct_vm.expect_revert("has not been judged"):
         c.settle_report(rid)
 
 
 def test_stake_cannot_settle_twice(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=400)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>noise</html>"})
-    direct_vm.mock_llm(r".*", {"valid": False, "score": 5,
-                               "reason": "Noise.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    _fund(direct_vm, c, direct_alice, POOL)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
     c.judge_report(rid)
     c.settle_report(rid)
-    with direct_vm.expect_revert("Stake already settled"):
+    with direct_vm.expect_revert("already paid out"):
         c.settle_report(rid)
 
 
-def test_cannot_pay_beyond_pool(direct_vm, direct_deploy, direct_alice, direct_bob):
+def test_unfunded_cannot_be_settled_directly(direct_vm, direct_deploy, direct_alice, direct_bob):
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 100)     # pool only 100
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=400)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>real defect</html>"})
-    direct_vm.mock_llm(r".*", {"valid": True, "score": 80,
-                               "reason": "Real.", "confidence": "high"})
-    direct_vm.sender = direct_alice
+    _fund(direct_vm, c, direct_alice, BOUNTY // 2)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
     c.judge_report(rid)
-    with direct_vm.expect_revert("Bounty pool does not cover this finding"):
+    with direct_vm.expect_revert("unfunded"):
         c.settle_report(rid)
 
-
-# ------------------------------------------------- 5. withdrawal ----
-
-def test_withdraw_pool_admin_only_and_capped(direct_vm, direct_deploy, direct_alice, direct_bob):
-    c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=400)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>noise</html>"})
-    direct_vm.mock_llm(r".*", {"valid": False, "score": 5,
-                               "reason": "Noise.", "confidence": "high"})
-    direct_vm.sender = direct_alice
-    c.judge_report(rid)
-    c.settle_report(rid)
-
-    direct_vm.sender = direct_bob
-    with direct_vm.expect_revert("Only the project admin can do this"):
-        c.withdraw_pool(50, _addr(direct_bob))
-
-    direct_vm.sender = direct_alice
-    with direct_vm.expect_revert("Amount must be positive"):
-        c.withdraw_pool(0, _addr(direct_alice))
-    with direct_vm.expect_revert("Not enough in the pool"):
-        c.withdraw_pool(5000, _addr(direct_alice))
-
-    c.withdraw_pool(100, _addr(direct_alice))   # exactly the slashed amount
-    p = c.get_pools()
-    assert int(p["slash_pool"]) == 0
-    assert int(p["bounty_pool"]) == 1000
-
-
-# ------------------------------------------------- 6. lifecycle ----
 
 def test_full_audit_lifecycle(direct_vm, direct_deploy, direct_alice, direct_bob):
-    """Fund -> file -> triage -> pay -> withdraw. Pools end at zero."""
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-    rid = _report(direct_vm, c, direct_bob, stake=100, bounty=300)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "<html>reproducible defect</html>"})
-    direct_vm.mock_llm(r".*", {"valid": True, "score": 86,
-                               "reason": "Clear repro.", "confidence": "high"})
-    direct_vm.sender = direct_alice
-    c.judge_report(rid)
-    c.settle_report(rid)
+    _fund(direct_vm, c, direct_alice, POOL)
+
+    # The first registered mock wins, so bind each verdict to its own report URL marker.
+    direct_vm.mock_web(".*", {"status": 200, "body": "x" * 300})
+    direct_vm.mock_llm(".*good-marker.*", {"valid": True, "score": 90,
+                                           "reason": "component, mechanism and reproduction present",
+                                           "confidence": "high"})
+    direct_vm.mock_llm(".*bad-marker.*", {"valid": False, "score": 10,
+                                          "reason": "style nit with no defect",
+                                          "confidence": "high"})
+
+    good = _report(direct_vm, c, direct_bob, project="acme-vault", revision="v1.0.0",
+                   url="https://example.com/good-marker", digest="a" * 64)
+    c.judge_report(good)
+    c.settle_report(good)
+
+    bad = _report(direct_vm, c, direct_bob, project="acme-vault", revision="v1.0.0",
+                  title="Style nit", url="https://example.com/bad-marker", digest="b" * 64)
+    c.judge_report(bad)
+    c.settle_report(bad)
 
     p = c.get_pools()
-    assert int(p["bounty_pool"]) == 700        # 1000 - 300
-    c.withdraw_pool(700, _addr(direct_alice))
-    assert int(c.get_pools()["bounty_pool"]) == 0
+    assert int(p["bounty_pool"]) == POOL - BOUNTY
+    assert int(p["slash_pool"]) == STAKE
+    assert int(p["committed"]) == 0
+    assert int(p["report_count"]) == 2
 
 
 def test_stake_always_settles_one_way_or_the_other(direct_vm, direct_deploy, direct_alice, direct_bob):
-    """No finding can leave its stake stranded: it returns if valid, is slashed if not."""
     c = _deploy(direct_vm, direct_deploy, direct_alice)
-    _fund(direct_vm, c, direct_alice, 1000)
-
-    good = _report(direct_vm, c, direct_alice, title="Real bug", stake=100, bounty=200,
-                   url="https://example.com/real")
-    direct_vm.mock_web(r".*example\.com/real.*", {"status": 200, "body": "<html>actionable defect</html>"})
-    direct_vm.mock_web(r".*example\.com/noise.*", {"status": 200, "body": "<html>just a style nit</html>"})
-    direct_vm.mock_llm(r".*actionable defect.*", {"valid": True, "score": 82,
-                                                  "reason": "Actionable.", "confidence": "high"})
-    direct_vm.mock_llm(r".*style nit.*", {"valid": False, "score": 12,
-                                          "reason": "No defect.", "confidence": "high"})
-    direct_vm.sender = direct_alice
-    c.judge_report(good)
-    c.settle_report(good)
-    assert c.get_report(good)["stake_settled"] is True
-    assert int(c.get_pools()["slash_pool"]) == 0
-
-    bad = _report(direct_vm, c, direct_bob, title="Style nit", stake=100, bounty=200,
-                  url="https://example.com/noise")
-    direct_vm.sender = direct_bob
-    c.judge_report(bad)
-    assert int(c.get_report(bad)["state"]) == 2
-    c.settle_report(bad)
-    assert c.get_report(bad)["stake_settled"] is True
-    assert int(c.get_pools()["slash_pool"]) == 100
+    _fund(direct_vm, c, direct_alice, POOL)
+    rid = _report(direct_vm, c, direct_bob)
+    _mock_valid(direct_vm)
+    c.judge_report(rid)
+    c.settle_report(rid)
+    assert c.get_report(rid)["stake_settled"] is True
